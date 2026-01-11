@@ -1,0 +1,56 @@
+﻿<Window x:Class="Westral.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:Westral.App"
+        mc:Ignorable="d"
+        Title="MainWindow" Height="1080" Width="1920"
+        d:Background="Black">
+
+    <d:Window.DataContext>
+        <local:MainWindowViewModel />
+    </d:Window.DataContext>
+
+    <Border BorderBrush="LightGray" BorderThickness="{Binding BorderThickness}">
+        <Canvas x:Name="HudCanvas">
+            <Grid Width="{Binding ActualWidth, ElementName=HudCanvas}" Canvas.Bottom="50">
+                <ItemsControl 
+                    HorizontalAlignment="Center"
+                    ItemsSource="{Binding Data1}"
+                    d:ItemsSource="{d:SampleData}"
+                    FontSize="18"
+                >
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" HorizontalAlignment="Center" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+
+            <Grid 
+                Width="{Binding ActualWidth, ElementName=HudCanvas}"
+                Canvas.Bottom="400px" Canvas.Left="10px"
+            >
+
+                <ItemsControl 
+                    ItemsSource="{Binding Data2}"
+                    d:ItemsSource="{d:SampleData}"
+                    Foreground="{Binding BaseTextColor}"
+                    FontSize="18"
+                ></ItemsControl>
+            </Grid>
+
+            <TextBlock
+                Text="{Binding State}"
+                Foreground="{Binding StateColor}"
+                d:Text="Connected"
+                d:Foreground="LimeGreen"
+                FontSize="12"
+                Canvas.Bottom="10"
+                Canvas.Right="10"
+            />
+            </Canvas>
+    </Border>
+</Window>
