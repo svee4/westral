@@ -1,4 +1,5 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net.Http;
@@ -14,20 +15,29 @@ using Westral.App.WtApi;
 
 namespace Westral.App;
 
+public enum ConnectionState
+{
+    Connected = 1,
+    Loading,
+    Error,
+}
+
 [INotifyPropertyChanged]
 public sealed partial class MainWindowViewModel
 {
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StateColor))]
-    public partial string State { get; set; } = "";
+    public partial ConnectionState State { get; set; }
 
     public Brush StateColor => State switch
     {
-        "Connected" => Brushes.LimeGreen,
-        "Loading" => Brushes.Yellow,
-        "Error" => Brushes.Red,
+        ConnectionState.Connected => Brushes.LimeGreen,
+        ConnectionState.Loading => Brushes.Yellow,
+        ConnectionState.Error => Brushes.Red,
         _ => Brushes.Black,
     };
+
+    public string? ErrorMessage { get; set; }
 
     public int BorderThickness =>
 #if DEBUG
@@ -36,8 +46,6 @@ public sealed partial class MainWindowViewModel
         0
 #endif
         ;
-
-    public Brush BaseTextColor => Brushes.White;
 
     [ObservableProperty]
     public partial DataRow[] Data1 { get; set; } = [];
@@ -48,7 +56,21 @@ public sealed partial class MainWindowViewModel
 
 public sealed record DataRow(string Text, Brush Color)
 {
-    public DataRow(string text) : this(text, Brushes.White) { }
+    public DataRow(string text) : this(text, DefaultBrushes.Base) { }
+
+}
+
+public static class DefaultBrushes
+{
+    public static Brush Base => Brushes.White;
+
+    public static Brush Good => Brushes.LimeGreen;
+
+    public static Brush Note => Brushes.LightPink;
+
+    public static Brush Alert => Brushes.Coral;
+
+    public static Brush Error => Brushes.Red;
 }
 
 public partial class MainWindow : Window
@@ -65,8 +87,14 @@ public partial class MainWindow : Window
 
     private MainWindowViewModel _vm = new()
     {
-        State = "Loading",
+        State = ConnectionState.Loading,
     };
+
+    private System.Windows.Forms.NotifyIcon _trayIcon;
+    private CancellationTokenSource _cancellationTokenSource = new();
+
+    private Task _windowLoopTask;
+    private Task _apiLoopTask;
 
     public MainWindow()
     {
@@ -89,9 +117,53 @@ public partial class MainWindow : Window
         AllowsTransparency = true;
         Background = Brushes.Transparent;
 
+        ShowInTaskbar = false;
 
-        _ = RunWindowLoop();
-        _ = RunApiLoop();
+        _trayIcon = new System.Windows.Forms.NotifyIcon()
+        {
+            Text = "Westral",
+            Visible = true,
+            Icon = Icon,
+            ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
+            {
+                Items =
+                {
+                    new System.Windows.Forms.ToolStripButton()
+                    {
+                        Text = "Quit",
+                        Command = new RelayCommand(Quit)
+                    }
+                }
+            }
+        };
+
+        _windowLoopTask = Task.Run(async () =>
+        {
+            try
+            {
+                await RunWindowLoop();
+            }
+            catch { }
+        });
+
+        _apiLoopTask = Task.Run(async () =>
+        {
+            try
+            {
+                await RunApiLoop();
+            }
+            catch { }
+        });
+    }
+
+    private async void Quit()
+    {
+        _cancellationTokenSource.Cancel();
+        _trayIcon.Dispose();
+
+        await Task.WhenAll(_windowLoopTask, _apiLoopTask);
+
+        Application.Current.Shutdown();
     }
 
     [LibraryImport("user32.dll")]
@@ -111,22 +183,23 @@ public partial class MainWindow : Window
 
     private async Task RunWindowLoop()
     {
-        await Task.Yield();
-
         bool isTopmost = false;
 
-        const int MaxWindowTextLengthInCharsIncludingNull = 256;
+        const string TitleMatch = "War Thunder";
 
-        // cant await in unsafe
+        var token = _cancellationTokenSource.Token;
+
         nuint windowTextBuf;
         unsafe
         {
-            windowTextBuf = (nuint)NativeMemory.Alloc(MaxWindowTextLengthInCharsIncludingNull, sizeof(char));
+            windowTextBuf = (nuint)NativeMemory.Alloc((nuint)TitleMatch.Length + 1, sizeof(char));
         }
 
+        // TODO: we should try hooking into some window events instead of polling,
+        // or process creation events and use the WT PID
         while (true)
         {
-            await Task.Delay(100);
+            await Task.Delay(100, token);
 
             nuint wtWindowHandle = 0;
 
@@ -134,12 +207,12 @@ public partial class MainWindow : Window
             {
                 EnumWindows((hwnd, _) =>
                 {
-                    var length = GetWindowTextW(hwnd, (void*)windowTextBuf, MaxWindowTextLengthInCharsIncludingNull);
+                    var length = GetWindowTextW(hwnd, (void*)windowTextBuf, TitleMatch.Length + 1);
 
                     var span = new Span<byte>((void*)windowTextBuf, length * sizeof(char));
                     var windowText = Encoding.Unicode.GetString(span);
 
-                    if (windowText.StartsWith("War Thunder", StringComparison.Ordinal))
+                    if (windowText.Equals("War Thunder", StringComparison.Ordinal))
                     {
                         wtWindowHandle = hwnd;
                         return false;
@@ -148,6 +221,8 @@ public partial class MainWindow : Window
                     return true;
                 }, 0);
             }
+
+            token.ThrowIfCancellationRequested();
 
             if (wtWindowHandle != 0)
             {
@@ -196,21 +271,35 @@ public partial class MainWindow : Window
 
     private async Task RunApiLoop()
     {
-        await Task.Yield();
-
+        var token = _cancellationTokenSource.Token;
         while (true)
         {
+            if (token.IsCancellationRequested)
+            {
+                return;
+            }
+
             var last = Stopwatch.GetTimestamp();
 
             try
             {
-                var response = await _httpClient.GetAsync(StateModel.Route);
-                var content = await response.Content.ReadAsStringAsync();
+                var response = await _httpClient.GetAsync(StateModel.Route, token);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    SetErrorState($"Error {response.StatusCode}");
+                    await Task.Delay(500, token);
+                    continue;
+                }
+
+                var content = await response.Content.ReadAsStringAsync(token);
 
                 var json = JsonNode.Parse(content);
-                if (!(json?["valid"]?.GetValueKind() == JsonValueKind.True))
+                if (json?["valid"]?.GetValueKind() is not JsonValueKind.True)
                 {
-                    SetErrorState("Not valid");
+                    // not sure when this would happen
+                    SetErrorState("Not valid"); 
+                    await Task.Delay(500, token);
                     continue;
                 }
 
@@ -222,16 +311,43 @@ public partial class MainWindow : Window
                 DataRow flapsDescription = state.Flaps switch
                 {
                     0 => new("Raised"),
-                    <= 20 => new("Combat", Brushes.LightPink),
-                    <= 33 => new("Takeoff", Brushes.Coral),
-                    <= 100 => new("Landing", Brushes.Coral),
-                    _ => new("Unknown", Brushes.White)
+                    <= 20 => new("Combat", DefaultBrushes.Note),
+                    <= 33 => new("Takeoff", DefaultBrushes.Alert),
+                    <= 100 => new("Landing", DefaultBrushes.Alert),
+                    _ => new("Unknown", DefaultBrushes.Error),
                 };
+
+                DataRow enginePower;
+
+                {
+                    var brush = state.Power1 <= 0 ? DefaultBrushes.Alert : DefaultBrushes.Base;
+                    var text = $"{state.Power1:F0}";
+
+                    if (state.Power2.HasValue)
+                    {
+                        text += $" / {state.Power2.Value:F0}";
+                        if (state.Power2.Value <= 0)
+                        {
+                            brush = DefaultBrushes.Alert;
+                        }
+                    }
+
+                    if (state.Power3.HasValue)
+                    {
+                        text += $" / {state.Power3.Value:F0}";
+                        if (state.Power3.Value <= 0)
+                        {
+                            brush = DefaultBrushes.Alert;
+                        }
+                    }
+
+                    enginePower = new DataRow(text, brush);
+                }
 
                 DataRow[] dataRows =
                 [
                     flapsDescription,
-                    new($"{state.Power1} / {state.Power2}"),
+                    enginePower,
                 ];
 
                 string[] extraDataRows =
@@ -242,7 +358,8 @@ public partial class MainWindow : Window
 
                 Dispatcher.Invoke(() =>
                 {
-                    _vm.State = "Connected";
+                    _vm.State = ConnectionState.Connected;
+                    _vm.ErrorMessage = null;
 
                     _vm.Data1 = dataRows;
 
@@ -251,7 +368,8 @@ public partial class MainWindow : Window
             }
             catch
             {
-                SetErrorState("Error");
+                SetErrorState("Unknown error");
+                await Task.Delay(5000, token); // probably game isnt running. todo check more precisely
             }
         }
 
@@ -259,7 +377,8 @@ public partial class MainWindow : Window
         {
             Dispatcher.Invoke(() =>
             {
-                _vm.State = errorMessage;
+                _vm.State = ConnectionState.Error;
+                _vm.ErrorMessage = errorMessage;
             });
         }
     }

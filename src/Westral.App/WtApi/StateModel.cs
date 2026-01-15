@@ -75,6 +75,12 @@ public class StateModel
     [JsonPropertyName("power 1, hp")]
     public float Power1 { get; set; }
 
+    [JsonPropertyName("power 2, hp")]
+    public float? Power2 { get; set; }
+
+    [JsonPropertyName("power 3, hp")]
+    public float? Power3 { get; set; }
+
     //public int RPM1 { get; set; }
     //public float manifoldpressure1atm { get; set; }
     //public int oiltemp1C { get; set; }
@@ -90,8 +96,6 @@ public class StateModel
     //public int compressorstage2 { get; set; }
     //public int magneto2 { get; set; }
 
-    [JsonPropertyName("power 2, hp")]
-    public float Power2 { get; set; }
 
     //public int RPM2 { get; set; }
     //public float manifoldpressure2atm { get; set; }
