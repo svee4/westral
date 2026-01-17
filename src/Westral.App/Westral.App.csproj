@@ -11,9 +11,13 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
+	<ItemGroup>
+		<Resource Include="Icon.ico" />
+	</ItemGroup>
+
 	<ItemGroup Label="Winforms usings">
-		<Using Remove="System.Drawing"/>
-		<Using Remove="System.Windows.Forms"/>
+		<Using Remove="System.Drawing" />
+		<Using Remove="System.Windows.Forms" />
 	</ItemGroup>
 
 	<ItemGroup>

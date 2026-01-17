@@ -2,14 +2,13 @@
 using CommunityToolkit.Mvvm.Input;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
-using System.Windows.Input;
 using System.Windows.Media;
 using Westral.App.WtApi;
 
@@ -112,18 +111,20 @@ public partial class MainWindow : Window
         ResizeMode = ResizeMode.NoResize;
         WindowState = WindowState.Normal;
         WindowStyle = WindowStyle.None;
-        Topmost = true;
-        IsHitTestVisible = false;
         AllowsTransparency = true;
+        IsHitTestVisible = false;
         Background = Brushes.Transparent;
-
         ShowInTaskbar = false;
+
+        var iconStream = Application.GetResourceStream(
+                new Uri("pack://application:,,,/Icon.ico"))
+            .Stream;
 
         _trayIcon = new System.Windows.Forms.NotifyIcon()
         {
             Text = "Westral",
             Visible = true,
-            Icon = Icon,
+            Icon = new System.Drawing.Icon(iconStream),
             ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
             {
                 Items =
@@ -159,10 +160,10 @@ public partial class MainWindow : Window
     private async void Quit()
     {
         _cancellationTokenSource.Cancel();
-        _trayIcon.Dispose();
 
         await Task.WhenAll(_windowLoopTask, _apiLoopTask);
 
+        _trayIcon.Dispose();
         Application.Current.Shutdown();
     }
 
@@ -183,7 +184,8 @@ public partial class MainWindow : Window
 
     private async Task RunWindowLoop()
     {
-        bool isTopmost = false;
+        bool isTopmost;
+        UnsetTopmost();
 
         const string TitleMatch = "War Thunder";
 
@@ -251,6 +253,7 @@ public partial class MainWindow : Window
             {
                 Height = SystemParameters.PrimaryScreenHeight;
                 Width = SystemParameters.PrimaryScreenWidth;
+                Topmost = true;
             });
 
             isTopmost = true;
@@ -262,6 +265,7 @@ public partial class MainWindow : Window
             {
                 Height = UnfocusedWindowSize;
                 Width = UnfocusedWindowSize;
+                Topmost = false;
             });
 
             isTopmost = false;
@@ -320,26 +324,13 @@ public partial class MainWindow : Window
                 DataRow enginePower;
 
                 {
-                    var brush = state.Power1 <= 0 ? DefaultBrushes.Alert : DefaultBrushes.Base;
-                    var text = $"{state.Power1:F0}";
+                    var powers = json.AsObject()
+                        .Where(node => node.Key.StartsWith("power ", StringComparison.Ordinal))
+                        .Select(node => node.Value.Deserialize<float>())
+                        .ToArray();
 
-                    if (state.Power2.HasValue)
-                    {
-                        text += $" / {state.Power2.Value:F0}";
-                        if (state.Power2.Value <= 0)
-                        {
-                            brush = DefaultBrushes.Alert;
-                        }
-                    }
-
-                    if (state.Power3.HasValue)
-                    {
-                        text += $" / {state.Power3.Value:F0}";
-                        if (state.Power3.Value <= 0)
-                        {
-                            brush = DefaultBrushes.Alert;
-                        }
-                    }
+                    var text = string.Join(" / ", powers.Select(p => p.ToString("F0", CultureInfo.InvariantCulture)));
+                    var brush = powers.Any(p => p == 0) ? DefaultBrushes.Alert : DefaultBrushes.Base;
 
                     enginePower = new DataRow(text, brush);
                 }
@@ -362,7 +353,6 @@ public partial class MainWindow : Window
                     _vm.ErrorMessage = null;
 
                     _vm.Data1 = dataRows;
-
                     _vm.Data2 = extraDataRows;
                 });
             }
