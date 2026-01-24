@@ -1,18 +1,28 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using System.CodeDom;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Media;
 using Westral.App.WtApi;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.Accessibility;
+using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Westral.App;
+
+using unsafe WinEventHookCallback = delegate* unmanaged[Stdcall]<global::Windows.Win32.UI.Accessibility.HWINEVENTHOOK, uint, global::Windows.Win32.Foundation.HWND, int, int, uint, uint, void>;
 
 public enum ConnectionState
 {
@@ -21,8 +31,7 @@ public enum ConnectionState
     Error,
 }
 
-[INotifyPropertyChanged]
-public sealed partial class MainWindowViewModel
+public sealed partial class MainWindowViewModel : ObservableObject
 {
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StateColor))]
@@ -76,35 +85,53 @@ public partial class MainWindow : Window
 {
     private const int UnfocusedWindowSize =
 #if DEBUG
-        0
+        500
 #else
         0
 #endif
         ;
 
-    private HttpClient _httpClient;
+    private readonly HttpClient _httpClient;
+    private readonly MainWindowViewModel _vm;
 
-    private MainWindowViewModel _vm = new()
-    {
-        State = ConnectionState.Loading,
-    };
+    private readonly System.Windows.Forms.NotifyIcon _trayIcon;
+    private readonly CancellationTokenSource _cancellationTokenSource = new();
 
-    private System.Windows.Forms.NotifyIcon _trayIcon;
-    private CancellationTokenSource _cancellationTokenSource = new();
-
-    private Task _windowLoopTask;
-    private Task _apiLoopTask;
+    private readonly Task _windowLoopTask;
+    private readonly Task _apiLoopTask;
 
     public MainWindow()
     {
-        DataContext = _vm;
-        _httpClient = new HttpClient();
-        _httpClient.BaseAddress = new Uri("http://localhost:8111");
+#if DEBUG
+        // logging is currently debug only.
+        // TODO make this configurable somehow and maybe add a file sink
+        _ = Task.Run(RunLogLoop);
+#endif
 
-        InitializeComponent();
+        Log($"Main T: {Environment.CurrentManagedThreadId}");
 
-        Height = UnfocusedWindowSize;
-        Width = UnfocusedWindowSize;
+        DataContext = _vm = new()
+        {
+            State = ConnectionState.Loading,
+        };
+
+        _httpClient = new HttpClient
+        {
+            BaseAddress = new Uri("http://localhost:8111")
+        };
+
+        Loaded += (_, _) =>
+        {
+            Log("Hiding from alt tab");
+
+            var windowHandle = (HWND)new WindowInteropHelper(this).Handle;
+            var windowLong = PInvoke.GetWindowLong(windowHandle, WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE);
+
+            _ = PInvoke.SetWindowLong(
+                windowHandle,
+                WINDOW_LONG_PTR_INDEX.GWL_EXSTYLE,
+                (windowLong | (int)WINDOW_EX_STYLE.WS_EX_TOOLWINDOW) & ~(int)WINDOW_EX_STYLE.WS_EX_APPWINDOW);
+        };
 
         Left = 0;
         Top = 0;
@@ -116,20 +143,17 @@ public partial class MainWindow : Window
         Background = Brushes.Transparent;
         ShowInTaskbar = false;
 
-        var iconStream = Application.GetResourceStream(
-                new Uri("pack://application:,,,/Icon.ico"))
-            .Stream;
-
         _trayIcon = new System.Windows.Forms.NotifyIcon()
         {
             Text = "Westral",
             Visible = true,
-            Icon = new System.Drawing.Icon(iconStream),
+            Icon = new System.Drawing.Icon(
+                Application.GetResourceStream(new Uri("pack://application:,,,/Icon.ico")).Stream),
             ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
             {
                 Items =
                 {
-                    new System.Windows.Forms.ToolStripButton()
+                    new System.Windows.Forms.ToolStripMenuItem()
                     {
                         Text = "Quit",
                         Command = new RelayCommand(Quit)
@@ -137,6 +161,8 @@ public partial class MainWindow : Window
                 }
             }
         };
+
+        InitializeComponent();
 
         _windowLoopTask = Task.Run(async () =>
         {
@@ -159,90 +185,151 @@ public partial class MainWindow : Window
 
     private async void Quit()
     {
+        Log("Quit requested");
         _cancellationTokenSource.Cancel();
+
+        Log($"Waiting for exit");
+        var start = Stopwatch.GetTimestamp();
 
         await Task.WhenAll(_windowLoopTask, _apiLoopTask);
 
+        var elapsed = Stopwatch.GetElapsedTime(start);
+        Log($"Exited in {elapsed.Milliseconds}ms");
+
         _trayIcon.Dispose();
         Application.Current.Shutdown();
+
     }
 
-    [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool EnumWindows(EnumWindowsProc enumProc, nuint lParam);
+    private readonly Channel<string> _logChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions()
+    {
+        AllowSynchronousContinuations = false,
+        SingleReader = true,
+        SingleWriter = false,
+    });
 
-    private delegate bool EnumWindowsProc(nuint hWnd, nuint lParam);
+    [Conditional("DEBUG")]
+    private void Log(
+        string message,
+        [CallerMemberName] string? caller = null)
+    {
+        _logChannel.Writer.TryWrite($"[{caller}] {message}");
+    }
 
-    [LibraryImport("user32.dll")]
-    private static unsafe partial int GetWindowTextW(
-        nuint hWnd,
-        void* lpString,
-        int nMaxCount);
+    private async Task RunLogLoop()
+    {
+        PInvoke.AllocConsole();
 
-    [LibraryImport("user32.dll")]
-    private static partial nuint GetForegroundWindow();
+        await foreach (var message in _logChannel.Reader.ReadAllAsync())
+        {
+            Console.WriteLine(message);
+        }
+    }
+
+    private static readonly Channel<HWND> _foregroundWindowChannel = Channel.CreateBounded<HWND>(
+        new BoundedChannelOptions(capacity: 1)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        });
 
     private async Task RunWindowLoop()
     {
+        const int EVENT_SYSTEM_FOREGROUND = 0x0003;
+
+        unsafe
+        {
+            // has to run on the message loop thread i believe
+            Dispatcher.Invoke(() =>
+            {
+                Log($"Setup T: {Environment.CurrentManagedThreadId}");
+
+                var eventHandle = PInvoke.SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    HMODULE.Null,
+                    &ForegroundCallback,
+                    0, 0, 0);            
+            });
+        }
+
+        await RunForegroundListener();
+
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+        unsafe static void ForegroundCallback(
+            HWINEVENTHOOK hWinEventHook,
+            uint @event,
+            HWND hwnd,
+            int idObject,
+            int idChild,
+            uint idEventThread,
+            uint dwmsEventTime)
+        {
+            _foregroundWindowChannel.Writer.TryWrite(hwnd);
+        }
+    }
+
+    private async Task RunForegroundListener()
+    {
+        var token = _cancellationTokenSource.Token;
+
         bool isTopmost;
         UnsetTopmost();
 
         const string TitleMatch = "War Thunder";
+        const int WindowTextBufferSize = 256 + 1;
 
-        var token = _cancellationTokenSource.Token;
-
-        nuint windowTextBuf;
+        PWSTR windowTextBuf;
         unsafe
         {
-            windowTextBuf = (nuint)NativeMemory.Alloc((nuint)TitleMatch.Length + 1, sizeof(char));
+            windowTextBuf = (PWSTR)NativeMemory.Alloc(WindowTextBufferSize, sizeof(char));
         }
 
-        // TODO: we should try hooking into some window events instead of polling,
-        // or process creation events and use the WT PID
-        while (true)
+        await foreach (var hwnd in _foregroundWindowChannel.Reader.ReadAllAsync(token))
         {
-            await Task.Delay(100, token);
-
-            nuint wtWindowHandle = 0;
+            Span<char> windowText;
 
             unsafe
             {
-                EnumWindows((hwnd, _) =>
-                {
-                    var length = GetWindowTextW(hwnd, (void*)windowTextBuf, TitleMatch.Length + 1);
-
-                    var span = new Span<byte>((void*)windowTextBuf, length * sizeof(char));
-                    var windowText = Encoding.Unicode.GetString(span);
-
-                    if (windowText.Equals("War Thunder", StringComparison.Ordinal))
-                    {
-                        wtWindowHandle = hwnd;
-                        return false;
-                    }
-
-                    return true;
-                }, 0);
+                var length = PInvoke.GetWindowText(hwnd, windowTextBuf, WindowTextBufferSize);
+                windowText = new Span<char>((void*)windowTextBuf, length);
             }
 
-            token.ThrowIfCancellationRequested();
+            Log($"T: {Environment.CurrentManagedThreadId}");
+            Log($"FG: {windowText}");
 
-            if (wtWindowHandle != 0)
+            if (windowText.StartsWith("Task Switching", StringComparison.Ordinal))
             {
-                var foregroundWindow = GetForegroundWindow();
+                // alt tab fires a "task switching" window,
+                // AFTER the actual window that was focused.
+                Log("Ignored alt tab window");
+                continue;
+            }
 
-                if (foregroundWindow == wtWindowHandle)
+            if (windowText.StartsWith(TitleMatch, StringComparison.Ordinal))
+            {
+                Log("Got matching window");
+
+                if (isTopmost)
                 {
-                    if (!isTopmost)
-                    {
-                        SetTopmost();
-                    }
+                    Log("Already topmost (?)");
                 }
                 else
                 {
-                    if (isTopmost)
-                    {
-                        UnsetTopmost();
-                    }
+                    Log("Setting topmost");
+                    SetTopmost();
+                }
+            }
+            else
+            {
+                Log("Did not match window");
+
+                if (isTopmost)
+                {
+                    Log("Unsetting topmost");
+                    UnsetTopmost();
                 }
             }
         }
@@ -263,14 +350,13 @@ public partial class MainWindow : Window
         {
             Dispatcher.Invoke(() =>
             {
+                Topmost = false;
                 Height = UnfocusedWindowSize;
                 Width = UnfocusedWindowSize;
-                Topmost = false;
             });
 
             isTopmost = false;
         }
-
     }
 
     private async Task RunApiLoop()
@@ -288,10 +374,14 @@ public partial class MainWindow : Window
             try
             {
                 var response = await _httpClient.GetAsync(StateModel.Route, token);
+                Log($"Got response {response.StatusCode}");
 
                 if (!response.IsSuccessStatusCode)
                 {
                     SetErrorState($"Error {response.StatusCode}");
+
+                    Log(await response.Content.ReadAsStringAsync());
+
                     await Task.Delay(500, token);
                     continue;
                 }
@@ -302,7 +392,9 @@ public partial class MainWindow : Window
                 if (json?["valid"]?.GetValueKind() is not JsonValueKind.True)
                 {
                     // not sure when this would happen
+                    Log($"Not valid: {content}");
                     SetErrorState("Not valid"); 
+
                     await Task.Delay(500, token);
                     continue;
                 }
@@ -356,8 +448,9 @@ public partial class MainWindow : Window
                     _vm.Data2 = extraDataRows;
                 });
             }
-            catch
+            catch (Exception e)
             {
+                Log($"Unknown error: {e}");
                 SetErrorState("Unknown error");
                 await Task.Delay(5000, token); // probably game isnt running. todo check more precisely
             }

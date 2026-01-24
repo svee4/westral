@@ -1,0 +1,12 @@
+GetWindowLong
+SetWindowLong
+
+EnumWindows
+GetWindowTextW
+GetForegroundWindow
+
+SetWinEventHook
+
+WINDOW_EX_STYLE
+
+AllocConsole

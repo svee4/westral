@@ -7,7 +7,8 @@
         mc:Ignorable="d"
         Title="MainWindow" Height="1080" Width="1920"
         Icon="/Icon.ico"
-        d:Background="Black">
+        d:Background="Black"
+    >
 
     <d:Window.DataContext>
         <local:MainWindowViewModel />
