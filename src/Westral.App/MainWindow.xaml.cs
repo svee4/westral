@@ -462,6 +462,8 @@ public partial class MainWindow : Window
             {
                 _vm.State = ConnectionState.Error;
                 _vm.ErrorMessage = errorMessage;
+                _vm.Data1 = [];
+                _vm.Data2 = [];
             });
         }
     }
