@@ -22,8 +22,6 @@ using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Westral.App;
 
-using unsafe WinEventHookCallback = delegate* unmanaged[Stdcall]<global::Windows.Win32.UI.Accessibility.HWINEVENTHOOK, uint, global::Windows.Win32.Foundation.HWND, int, int, uint, uint, void>;
-
 public enum ConnectionState
 {
     Connected = 1,
@@ -59,7 +57,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
     public partial ICollection<DataRow> Data1 { get; set; } = [];
 
     [ObservableProperty]
-    public partial string[] Data2 { get; set; } = [];
+    public partial ICollection<DataRow> Data2 { get; set; } = [];
 }
 
 public sealed record DataRow(string Text, Brush Color)
@@ -70,14 +68,19 @@ public sealed record DataRow(string Text, Brush Color)
 
 public static class DefaultBrushes
 {
+    /// <summary>White</summary>
     public static Brush Base => Brushes.White;
 
+    /// <summary>Green</summary>
     public static Brush Good => Brushes.LimeGreen;
 
+    /// <summary>Pink</summary>
     public static Brush Note => Brushes.LightPink;
 
+    /// <summary>Coral</summary>
     public static Brush Alert => Brushes.Coral;
 
+    /// <summary>Red</summary>
     public static Brush Error => Brushes.Red;
 }
 
@@ -373,7 +376,7 @@ public partial class MainWindow : Window
             new BoundedChannelOptions(capacity: 1)
             {
                 SingleReader = true,
-                SingleWriter = true,
+                SingleWriter = false,
                 AllowSynchronousContinuations = false,
                 FullMode = BoundedChannelFullMode.DropOldest,
             });
@@ -381,6 +384,13 @@ public partial class MainWindow : Window
     private async Task RunUiLoop()
     {
         var token = _cancellationTokenSource.Token;
+
+        var latencyQueue = new Queue<double>(capacity: 50);
+
+        for (var i = 0; i < 50; i++)
+        {
+            latencyQueue.Enqueue(0);
+        }
 
         var last = Stopwatch.GetTimestamp();
 
@@ -404,12 +414,18 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var latencyMs = Stopwatch.GetElapsedTime(last).Milliseconds;
-            last = Stopwatch.GetTimestamp();
+            var now = Stopwatch.GetTimestamp();
+            var latency = Stopwatch.GetElapsedTime(last).TotalMilliseconds;
+            last = now;
+
+            latencyQueue.Dequeue();
+            latencyQueue.Enqueue(latency);
+
+            var latencyMs = latencyQueue.Average();
 
             List<DataRow> dataRows = new List<DataRow>(3);
 
-            if (state["airbrake, %"]?.GetValue<int>() is int v and > 0)
+            if (state["airbrake, %"]?.GetValue<int>() is int and > 0)
             {
                 dataRows.Add(new($"Airbrake", DefaultBrushes.Alert));
             }
@@ -443,12 +459,11 @@ public partial class MainWindow : Window
                 dataRows.Add(new DataRow(text, brush));
             }
 
-
-            string[] extraDataRows =
+            DataRow[] extraDataRows =
             [
-                $"AoA: {state["AoA, deg"]:F1} deg",
-                $"Δy: {state["Vy, m/s"]:F1} m/s",
-                $"Latency: {latencyMs} ms",
+                new($"Δy: {state["Vy, m/s"]?.GetValue<float>(),5:F1} m/s"),
+                new($"{-(indicators["aviahorizon_pitch"]?.GetValue<float>() ?? 0),3:F1}°"),
+                new($"Latency: {latencyMs:F0} ms"),
             ];
 
             Dispatcher.Invoke(() =>
@@ -466,6 +481,9 @@ public partial class MainWindow : Window
     {
         var token = _cancellationTokenSource.Token;
 
+        var valid1 = true;
+        var valid2 = true;
+
         var task1 = Task.Run(async () =>
         {
             while (!token.IsCancellationRequested)
@@ -479,21 +497,28 @@ public partial class MainWindow : Window
                     var response = await _httpClient.GetAsync(StateModel.Route, token);
 
                     var elapsed = Stopwatch.GetElapsedTime(last);
-                    Log("Normal httpclient:" + elapsed.ToString());
 
                     if (!response.IsSuccessStatusCode)
                     {
                         Log(await response.Content.ReadAsStringAsync(token));
+                        continue;
                     }
 
                     var json = await JsonNode.ParseAsync(response.Content.ReadAsStream(), cancellationToken: token);
+                    valid1 = json?["valid"]?.GetValueKind() is JsonValueKind.True;
+
+                    if (!valid1 || !valid2)
+                    {
+                        SetErrorState("Not valid");
+                        continue;
+                    }
+
                     _apiChannel.Writer.TryWrite((State: json?.AsObject(), Indicators: null));
                 }
                 catch (Exception e)
                 {
-                    var elapsed = Stopwatch.GetElapsedTime(last);
-                    Log(elapsed.ToString());
-                    Log(e.Message);
+                    Log(e.ToString());
+                    SetErrorState("Error");
                 }
             }
         });
@@ -512,11 +537,21 @@ public partial class MainWindow : Window
                     }
 
                     var json = await JsonNode.ParseAsync(response.Content.ReadAsStream(), cancellationToken: token);
+
+                    valid2 = json?["valid"]?.GetValueKind() is JsonValueKind.True;
+
+                    if (!valid1 || !valid2)
+                    {
+                        SetErrorState("Not valid");
+                        continue;
+                    }
+
                     _apiChannel.Writer.TryWrite((State: null, Indicators: json?.AsObject()));
                 }
                 catch (Exception e)
                 {
-
+                    Log(e.ToString());
+                    SetErrorState("Error");
                 }
             }
         });

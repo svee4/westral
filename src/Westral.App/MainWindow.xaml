@@ -36,13 +36,18 @@
                 Width="{Binding ActualWidth, ElementName=HudCanvas}"
                 Canvas.Bottom="500px" Canvas.Left="10px"
             >
-
                 <ItemsControl 
+                    HorizontalAlignment="Left"
                     ItemsSource="{Binding Data2}"
                     d:ItemsSource="{d:SampleData}"
-                    Foreground="{Binding Source={x:Static local:DefaultBrushes.Base}}"
                     FontSize="18"
-                ></ItemsControl>
+                >
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" HorizontalAlignment="Left" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </Grid>
 
             <TextBlock
