@@ -56,7 +56,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
         ;
 
     [ObservableProperty]
-    public partial DataRow[] Data1 { get; set; } = [];
+    public partial ICollection<DataRow> Data1 { get; set; } = [];
 
     [ObservableProperty]
     public partial string[] Data2 { get; set; } = [];
@@ -98,6 +98,7 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _cancellationTokenSource = new();
 
     private readonly Task _windowLoopTask;
+    private readonly Task _uiLoopTask;
     private readonly Task _apiLoopTask;
 
     public MainWindow()
@@ -117,7 +118,7 @@ public partial class MainWindow : Window
 
         _httpClient = new HttpClient
         {
-            BaseAddress = new Uri("http://localhost:8111")
+            BaseAddress = new Uri("http://127.0.0.1:8111"),
         };
 
         Loaded += (_, _) =>
@@ -173,6 +174,15 @@ public partial class MainWindow : Window
             catch { }
         });
 
+        _uiLoopTask = Task.Run(async () =>
+        {
+            try
+            {
+                await RunUiLoop();
+            }
+            catch { }
+        });
+
         _apiLoopTask = Task.Run(async () =>
         {
             try
@@ -191,14 +201,13 @@ public partial class MainWindow : Window
         Log($"Waiting for exit");
         var start = Stopwatch.GetTimestamp();
 
-        await Task.WhenAll(_windowLoopTask, _apiLoopTask);
+        await Task.WhenAll(_windowLoopTask, _uiLoopTask, _apiLoopTask);
 
         var elapsed = Stopwatch.GetElapsedTime(start);
         Log($"Exited in {elapsed.Milliseconds}ms");
 
         _trayIcon.Dispose();
         Application.Current.Shutdown();
-
     }
 
     private readonly Channel<string> _logChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions()
@@ -359,52 +368,56 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task RunApiLoop()
+    private Channel<(JsonObject? State, JsonObject? Indicators)> _apiChannel =
+        Channel.CreateBounded<(JsonObject? State, JsonObject? Indicators)>(
+            new BoundedChannelOptions(capacity: 1)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                AllowSynchronousContinuations = false,
+                FullMode = BoundedChannelFullMode.DropOldest,
+            });
+
+    private async Task RunUiLoop()
     {
         var token = _cancellationTokenSource.Token;
-        while (true)
+
+        var last = Stopwatch.GetTimestamp();
+
+        JsonObject? state = null;
+        JsonObject? indicators = null;
+
+        await foreach (var (newState, newIndicators) in _apiChannel.Reader.ReadAllAsync(token))
         {
-            if (token.IsCancellationRequested)
+            if (newState is not null)
             {
-                return;
+                state = newState;
             }
 
-            var last = Stopwatch.GetTimestamp();
-
-            try
+            if (newIndicators is not null)
             {
-                var response = await _httpClient.GetAsync(StateModel.Route, token);
-                Log($"Got response {response.StatusCode}");
+                indicators = newIndicators;
+            }
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    SetErrorState($"Error {response.StatusCode}");
+            if (state is null || indicators is null)
+            {
+                continue;
+            }
 
-                    Log(await response.Content.ReadAsStringAsync());
+            var latencyMs = Stopwatch.GetElapsedTime(last).Milliseconds;
+            last = Stopwatch.GetTimestamp();
 
-                    await Task.Delay(500, token);
-                    continue;
-                }
+            List<DataRow> dataRows = new List<DataRow>(3);
 
-                var content = await response.Content.ReadAsStringAsync(token);
+            if (state["airbrake, %"]?.GetValue<int>() is int v and > 0)
+            {
+                dataRows.Add(new($"Airbrake", DefaultBrushes.Alert));
+            }
 
-                var json = JsonNode.Parse(content);
-                if (json?["valid"]?.GetValueKind() is not JsonValueKind.True)
-                {
-                    // not sure when this would happen
-                    Log($"Not valid: {content}");
-                    SetErrorState("Not valid"); 
-
-                    await Task.Delay(500, token);
-                    continue;
-                }
-
-                var state = JsonSerializer.Deserialize<StateModel>(json) ?? throw new UnreachableException();
-
-                var latencyMs = Stopwatch.GetElapsedTime(last).Milliseconds;
-                last = Stopwatch.GetTimestamp();
-
-                DataRow flapsDescription = state.Flaps switch
+            // some planes don't have the flaps value
+            if (indicators["type"]?.GetValue<string>() is not "f_2a_adtw")
+            {
+                DataRow flapsDescription = state["flaps, %"]?.GetValue<int>() switch
                 {
                     0 => new("Raised"),
                     <= 20 => new("Combat", DefaultBrushes.Note),
@@ -413,58 +426,112 @@ public partial class MainWindow : Window
                     _ => new("Unknown", DefaultBrushes.Error),
                 };
 
-                DataRow enginePower;
-
-                {
-                    var powers = json.AsObject()
-                        .Where(node => node.Key.StartsWith("power ", StringComparison.Ordinal))
-                        .Select(node => node.Value.Deserialize<float>())
-                        .ToArray();
-
-                    var text = string.Join(" / ", powers.Select(p => p.ToString("F0", CultureInfo.InvariantCulture)));
-                    var brush = powers.Any(p => p == 0) ? DefaultBrushes.Alert : DefaultBrushes.Base;
-
-                    enginePower = new DataRow(text, brush);
-                }
-
-                DataRow[] dataRows =
-                [
-                    flapsDescription,
-                    enginePower,
-                ];
-
-                string[] extraDataRows =
-                [
-                    $"Δy: {state.Vy:F1} m/s",
-                    $"Latency: {latencyMs} ms",
-                ];
-
-                Dispatcher.Invoke(() =>
-                {
-                    _vm.State = ConnectionState.Connected;
-                    _vm.ErrorMessage = null;
-
-                    _vm.Data1 = dataRows;
-                    _vm.Data2 = extraDataRows;
-                });
+                dataRows.Add(flapsDescription);
             }
-            catch (Exception e)
+
+            // some planes (jets?) dont have power value
+            if (indicators["type"]?.GetValue<string>() is not "f_2a_adtw")
             {
-                Log($"Unknown error: {e}");
-                SetErrorState("Unknown error");
-                await Task.Delay(5000, token); // probably game isnt running. todo check more precisely
-            }
-        }
+                var powers = state
+                    .Where(node => node.Key.StartsWith("power ", StringComparison.Ordinal))
+                    .Select(node => node.Value.Deserialize<float>())
+                    .ToArray();
 
-        void SetErrorState(string errorMessage)
-        {
+                var text = string.Join(" / ", powers.Select(p => p.ToString("F0", CultureInfo.InvariantCulture)));
+                var brush = powers.Any(p => p == 0) ? DefaultBrushes.Alert : DefaultBrushes.Base;
+
+                dataRows.Add(new DataRow(text, brush));
+            }
+
+
+            string[] extraDataRows =
+            [
+                $"AoA: {state["AoA, deg"]:F1} deg",
+                $"Δy: {state["Vy, m/s"]:F1} m/s",
+                $"Latency: {latencyMs} ms",
+            ];
+
             Dispatcher.Invoke(() =>
             {
-                _vm.State = ConnectionState.Error;
-                _vm.ErrorMessage = errorMessage;
-                _vm.Data1 = [];
-                _vm.Data2 = [];
+                _vm.State = ConnectionState.Connected;
+                _vm.ErrorMessage = null;
+
+                _vm.Data1 = dataRows;
+                _vm.Data2 = extraDataRows;
             });
         }
+    }
+
+    private async Task RunApiLoop()
+    {
+        var token = _cancellationTokenSource.Token;
+
+        var task1 = Task.Run(async () =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var last = Stopwatch.GetTimestamp();
+
+                try
+                {
+                    last = Stopwatch.GetTimestamp();
+
+                    var response = await _httpClient.GetAsync(StateModel.Route, token);
+
+                    var elapsed = Stopwatch.GetElapsedTime(last);
+                    Log("Normal httpclient:" + elapsed.ToString());
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Log(await response.Content.ReadAsStringAsync(token));
+                    }
+
+                    var json = await JsonNode.ParseAsync(response.Content.ReadAsStream(), cancellationToken: token);
+                    _apiChannel.Writer.TryWrite((State: json?.AsObject(), Indicators: null));
+                }
+                catch (Exception e)
+                {
+                    var elapsed = Stopwatch.GetElapsedTime(last);
+                    Log(elapsed.ToString());
+                    Log(e.Message);
+                }
+            }
+        });
+
+        var task2 = Task.Run(async () =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    var response = await _httpClient.GetAsync(IndicatorsModel.Route, token);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        Log(await response.Content.ReadAsStringAsync(token));
+                    }
+
+                    var json = await JsonNode.ParseAsync(response.Content.ReadAsStream(), cancellationToken: token);
+                    _apiChannel.Writer.TryWrite((State: null, Indicators: json?.AsObject()));
+                }
+                catch (Exception e)
+                {
+
+                }
+            }
+        });
+
+        await Task.WhenAll(task1, task2);
+    }
+
+    private void SetErrorState(string errorMessage)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            _vm.State = ConnectionState.Error;
+            _vm.ErrorMessage = errorMessage;
+            _vm.Data1 = [];
+            _vm.Data2 = [];
+        });
     }
 }
