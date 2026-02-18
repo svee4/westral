@@ -4,6 +4,10 @@
              xmlns:local="clr-namespace:Westral.App"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="Leelawadee UI" />
+        </Style>
+
     </Application.Resources>
 </Application>

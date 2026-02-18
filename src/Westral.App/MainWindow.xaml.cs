@@ -1,13 +1,10 @@
 ﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using System.CodeDom;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
@@ -22,29 +19,8 @@ using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace Westral.App;
 
-public enum ConnectionState
-{
-    Connected = 1,
-    Loading,
-    Error,
-}
-
 public sealed partial class MainWindowViewModel : ObservableObject
 {
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(StateColor))]
-    public partial ConnectionState State { get; set; }
-
-    public Brush StateColor => State switch
-    {
-        ConnectionState.Connected => Brushes.LimeGreen,
-        ConnectionState.Loading => Brushes.Yellow,
-        ConnectionState.Error => Brushes.Red,
-        _ => Brushes.Black,
-    };
-
-    public string? ErrorMessage { get; set; }
-
     public int BorderThickness =>
 #if DEBUG
         1
@@ -54,22 +30,24 @@ public sealed partial class MainWindowViewModel : ObservableObject
         ;
 
     [ObservableProperty]
-    public partial ICollection<DataRow> Data1 { get; set; } = [];
+    public partial IReadOnlyCollection<DataRow> Data1 { get; set; } = [];
 
     [ObservableProperty]
-    public partial ICollection<DataRow> Data2 { get; set; } = [];
+    public partial IReadOnlyCollection<DataRow> Data2 { get; set; } = [];
+
+    [ObservableProperty]
+    public partial IReadOnlyCollection<DataRow> SubData { get; set; } = [];
 }
 
-public sealed record DataRow(string Text, Brush Color)
+public record DataRow(string Text, Brush Color)
 {
     public DataRow(string text) : this(text, DefaultBrushes.Base) { }
-
 }
 
 public static class DefaultBrushes
 {
     /// <summary>White</summary>
-    public static Brush Base => Brushes.White;
+    public static Brush Base => Brushes.WhiteSmoke;
 
     /// <summary>Green</summary>
     public static Brush Good => Brushes.LimeGreen;
@@ -116,7 +94,7 @@ public partial class MainWindow : Window
 
         DataContext = _vm = new()
         {
-            State = ConnectionState.Loading,
+            SubData = [new("Loading", DefaultBrushes.Note)],
         };
 
         _httpClient = new HttpClient
@@ -371,15 +349,21 @@ public partial class MainWindow : Window
         }
     }
 
-    private Channel<(JsonObject? State, JsonObject? Indicators)> _apiChannel =
-        Channel.CreateBounded<(JsonObject? State, JsonObject? Indicators)>(
-            new BoundedChannelOptions(capacity: 1)
-            {
-                SingleReader = true,
-                SingleWriter = false,
-                AllowSynchronousContinuations = false,
-                FullMode = BoundedChannelFullMode.DropOldest,
-            });
+    private Channel<JsonObject> _stateChannel = Channel.CreateBounded<JsonObject>(new BoundedChannelOptions(capacity: 1)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        });
+
+    private Channel<JsonObject> _indicatorsChannel = Channel.CreateBounded<JsonObject>(new BoundedChannelOptions(capacity: 1)
+    {
+        SingleReader = true,
+        SingleWriter = true,
+        AllowSynchronousContinuations = false,
+        FullMode = BoundedChannelFullMode.DropOldest,
+    });
 
     private async Task RunUiLoop()
     {
@@ -394,26 +378,39 @@ public partial class MainWindow : Window
 
         var last = Stopwatch.GetTimestamp();
 
-        JsonObject? state = null;
-        JsonObject? indicators = null;
+        var state = await _stateChannel.Reader.ReadAsync(token);
+        var indicators = await _indicatorsChannel.Reader.ReadAsync(token);
 
-        await foreach (var (newState, newIndicators) in _apiChannel.Reader.ReadAllAsync(token))
+        var dataUpdatedEvent = new AutoResetEvent(true);
+
+        _ = Task.Run(async () =>
         {
-            if (newState is not null)
+            await foreach (var item in _stateChannel.Reader.ReadAllAsync(token))
             {
-                state = newState;
+                state = item;
+                dataUpdatedEvent.Set();
             }
+        });
 
-            if (newIndicators is not null)
+        _ = Task.Run(async () =>
+        {
+            await foreach (var item in _indicatorsChannel.Reader.ReadAllAsync(token))
             {
-                indicators = newIndicators;
+                indicators = item;
+                dataUpdatedEvent.Set();
             }
+        });
 
-            if (state is null || indicators is null)
+        while (!token.IsCancellationRequested)
+        {
+            if (dataUpdatedEvent.WaitOne(TimeSpan.FromMilliseconds(100)))
             {
-                continue;
+                Render(state, indicators);
             }
+        }
 
+        void Render(JsonObject state, JsonObject indicators)
+        {
             var now = Stopwatch.GetTimestamp();
             var latency = Stopwatch.GetElapsedTime(last).TotalMilliseconds;
             last = now;
@@ -433,16 +430,19 @@ public partial class MainWindow : Window
             // some planes don't have the flaps value
             if (indicators["type"]?.GetValue<string>() is not "f_2a_adtw")
             {
-                DataRow flapsDescription = state["flaps, %"]?.GetValue<int>() switch
+                DataRow? flapsDescription = state["flaps, %"]?.GetValue<int>() switch
                 {
                     0 => new("Raised"),
                     <= 20 => new("Combat", DefaultBrushes.Note),
                     <= 33 => new("Takeoff", DefaultBrushes.Alert),
                     <= 100 => new("Landing", DefaultBrushes.Alert),
-                    _ => new("Unknown", DefaultBrushes.Error),
+                    _ => null,
                 };
 
-                dataRows.Add(flapsDescription);
+                if (flapsDescription is not null)
+                {
+                    dataRows.Add(flapsDescription);
+                }
             }
 
             // some planes (jets?) dont have power value
@@ -463,14 +463,17 @@ public partial class MainWindow : Window
             [
                 new($"Δy: {state["Vy, m/s"]?.GetValue<float>(),5:F1} m/s"),
                 new($"{-(indicators["aviahorizon_pitch"]?.GetValue<float>() ?? 0),3:F1}°"),
+            ];
+
+            DataRow[] subData =
+            [
                 new($"Latency: {latencyMs:F0} ms"),
+                new("Connected", DefaultBrushes.Good),
             ];
 
             Dispatcher.Invoke(() =>
             {
-                _vm.State = ConnectionState.Connected;
-                _vm.ErrorMessage = null;
-
+                _vm.SubData = subData;
                 _vm.Data1 = dataRows;
                 _vm.Data2 = extraDataRows;
             });
@@ -488,15 +491,9 @@ public partial class MainWindow : Window
         {
             while (!token.IsCancellationRequested)
             {
-                var last = Stopwatch.GetTimestamp();
-
                 try
                 {
-                    last = Stopwatch.GetTimestamp();
-
                     var response = await _httpClient.GetAsync(StateModel.Route, token);
-
-                    var elapsed = Stopwatch.GetElapsedTime(last);
 
                     if (!response.IsSuccessStatusCode)
                     {
@@ -507,13 +504,13 @@ public partial class MainWindow : Window
                     var json = await JsonNode.ParseAsync(response.Content.ReadAsStream(), cancellationToken: token);
                     valid1 = json?["valid"]?.GetValueKind() is JsonValueKind.True;
 
-                    if (!valid1 || !valid2)
+                    if (!valid1 && !valid2)
                     {
                         SetErrorState("Not valid");
                         continue;
                     }
 
-                    _apiChannel.Writer.TryWrite((State: json?.AsObject(), Indicators: null));
+                    _stateChannel.Writer.TryWrite(json!.AsObject());
                 }
                 catch (Exception e)
                 {
@@ -540,13 +537,13 @@ public partial class MainWindow : Window
 
                     valid2 = json?["valid"]?.GetValueKind() is JsonValueKind.True;
 
-                    if (!valid1 || !valid2)
+                    if (!valid1 && !valid2)
                     {
                         SetErrorState("Not valid");
                         continue;
                     }
 
-                    _apiChannel.Writer.TryWrite((State: null, Indicators: json?.AsObject()));
+                    _indicatorsChannel.Writer.TryWrite(json!.AsObject());
                 }
                 catch (Exception e)
                 {
@@ -563,8 +560,7 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
-            _vm.State = ConnectionState.Error;
-            _vm.ErrorMessage = errorMessage;
+            _vm.SubData = [new DataRow(errorMessage, DefaultBrushes.Error)];
             _vm.Data1 = [];
             _vm.Data2 = [];
         });

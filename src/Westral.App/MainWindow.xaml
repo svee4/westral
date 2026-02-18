@@ -14,6 +14,9 @@
         <local:MainWindowViewModel />
     </d:Window.DataContext>
 
+    <Window.Resources>
+    </Window.Resources>
+
     <Border BorderBrush="LightGray" BorderThickness="{Binding BorderThickness}">
         <Canvas x:Name="HudCanvas">
             
@@ -22,11 +25,29 @@
                     HorizontalAlignment="Center"
                     ItemsSource="{Binding Data1}"
                     d:ItemsSource="{d:SampleData}"
-                    FontSize="18"
+                    FontSize="22"
                 >
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" HorizontalAlignment="Center" />
+                            <Grid>
+                                <TextBlock
+                                    Text="{Binding Text}"
+                                    Foreground="Black"
+                                    HorizontalAlignment="Center"
+                                >
+                                    <TextBlock.Effect>
+                                        <BlurEffect
+                                            Radius="4"
+                                            KernelType="Gaussian"
+                                        />
+                                    </TextBlock.Effect>
+                                </TextBlock>
+                                <TextBlock
+                                    Text="{Binding Text}"
+                                    Foreground="{Binding Color}"
+                                    HorizontalAlignment="Center" >
+                                </TextBlock>
+                            </Grid>                        
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
@@ -34,31 +55,61 @@
 
             <Grid 
                 Width="{Binding ActualWidth, ElementName=HudCanvas}"
-                Canvas.Bottom="500px" Canvas.Left="10px"
+                Canvas.Top="30px" Canvas.Left="400px"
             >
                 <ItemsControl 
                     HorizontalAlignment="Left"
                     ItemsSource="{Binding Data2}"
                     d:ItemsSource="{d:SampleData}"
-                    FontSize="18"
+                    FontSize="20"
                 >
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" HorizontalAlignment="Left" />
+                            <Grid>
+                                <TextBlock
+                                    Text="{Binding Text}"
+                                    Foreground="Black"
+                                    HorizontalAlignment="Left"
+                                >
+                                    <TextBlock.Effect>
+                                        <BlurEffect
+                                            Radius="4"
+                                            KernelType="Gaussian"
+                                        />
+                                    </TextBlock.Effect>
+                                </TextBlock>
+                                <TextBlock
+                                    Text="{Binding Text}"
+                                    Foreground="{Binding Color}"
+                                    HorizontalAlignment="Left" >
+                                </TextBlock>
+                            </Grid>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </Grid>
 
-            <TextBlock
-                Text="{Binding State}"
-                Foreground="{Binding StateColor}"
-                d:Text="Connected"
-                d:Foreground="LimeGreen"
-                FontSize="12"
-                Canvas.Bottom="10"
-                Canvas.Right="10"
-            />
-            </Canvas>
+            <Grid 
+                Width="{Binding ActualWidth, ElementName=HudCanvas}"
+                Canvas.Bottom="10px" Canvas.Right="10px"
+            >
+                <ItemsControl 
+                    HorizontalAlignment="Right"
+                    ItemsSource="{Binding SubData}"
+                    d:ItemsSource="{d:SampleData}"
+                    FontSize="18"
+                >
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock
+                                Text="{Binding Text}" 
+                                Foreground="{Binding Color}"
+                                FontSize="12" 
+                                HorizontalAlignment="Right" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </Canvas>
     </Border>
 </Window>
